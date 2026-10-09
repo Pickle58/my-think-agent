@@ -1,0 +1,51 @@
+.markdown {
+	white-space: normal;
+	line-height: 1.5;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown pre,
+.markdown table,
+.markdown blockquote {
+	margin: 0.5em 0;
+}
+
+.markdown ul,
+.markdown ol {
+	padding-left: 1.25em;
+}
+
+.markdown pre {
+	overflow-x: auto;
+	padding: 0.75em;
+	background: #f4f4f5;
+	border-radius: 4px;
+}
+
+.markdown code {
+	font-family: ui-monospace, monospace;
+}
+
+.markdown :not(pre) > code {
+	padding: 0.1em 0.3em;
+	background: #f4f4f5;
+	border-radius: 3px;
+}
+
+.markdown table {
+	border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+	border: 1px solid #d4d4d8;
+	padding: 0.25em 0.5em;
+}
+
+.markdown blockquote {
+	padding-left: 0.75em;
+	border-left: 3px solid #d4d4d8;
+	color: #52525b;
+}

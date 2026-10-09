@@ -1,0 +1,23 @@
+{
+	"name": "my-think-agent",
+	"compatibility_date": "2026-10-07",
+	"compatibility_flags": ["nodejs_compat"],
+	"ai": { "binding": "AI" },
+	"vars": {
+		"BRIEFING_DEFAULT_CITY": "Seattle",
+		"BRIEFING_DEFAULT_TIMEZONE": "America/Los_Angeles"
+	},
+	"secrets": {
+		"required": ["WEATHER_KEY", "DISCORD_WEBHOOK_URL"]
+	},
+	"observability": { "enabled": true },
+	"assets": {
+		"not_found_handling": "single-page-application",
+		"run_worker_first": ["/agents/*"]
+	},
+	"durable_objects": {
+		"bindings": [{ "class_name": "MyAgent", "name": "MyAgent" }]
+	},
+	"migrations": [{ "new_sqlite_classes": ["MyAgent"], "tag": "v1" }],
+	"main": "src/server.ts"
+}
