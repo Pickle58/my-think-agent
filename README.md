@@ -1,11 +1,13 @@
 # my-think-agent
 
-A personal chat agent on Cloudflare Workers, built with [`@cloudflare/think`](https://developers.cloudflare.com/agents/) and Durable Objects. It chats in the browser, looks up weather, and sends a daily weather briefing to Discord on a schedule.
+A personal chat agent on Cloudflare Workers, built with [`@cloudflare/think`](https://developers.cloudflare.com/agents/) and Durable Objects. It chats in the browser, reads assistant replies aloud, looks up weather, and sends a daily weather briefing to Discord on a schedule.
 
 ## What it does
 
 - Chat UI (React + Vite) talking to a `MyAgent` Durable Object over the Agents protocol.
-- Workers AI model `@cf/zai-org/glm-4.7-flash`.
+- Workers AI chat model `@cf/zai-org/glm-4.7-flash`.
+- Text-to-speech for assistant messages via Workers AI `@cf/deepgram/aura-2-en` (speaker `asteria`, MP3). Each reply has a Listen button. Auto-read in the header speaks the latest reply when a turn finishes and stores the choice in `localStorage` (`think-agent-auto-read`). Messages already on screen at load are not read. If the browser blocks autoplay, Auto-read turns itself off.
+- Speech is `GET /agents/my-agent/default/tts?messageId=...`. Only assistant messages are spoken. Markdown, code fences, and URLs are stripped, and text longer than 2000 characters is cut at a sentence boundary. Audio is cached privately for one hour. No extra secret; it uses the existing `AI` binding.
 - Weather tool backed by [WeatherAPI.com](https://www.weatherapi.com/).
 - Daily briefing: a Durable Object alarm runs `getScheduledTasks()`, fetches today's forecast, writes a summary into the chat, and posts it to a Discord webhook.
 
@@ -15,10 +17,10 @@ The schedule lives inside the Durable Object. No Worker cron trigger is required
 
 | Path | Role |
 | --- | --- |
-| `src/server.ts` | `MyAgent` class, tools, schedule, briefing handler |
+| `src/server.ts` | `MyAgent` class, tools, schedule, briefing handler, TTS route |
 | `src/weather.ts` | WeatherAPI client (current conditions and daily forecast) |
 | `src/discord.ts` | Discord webhook sender |
-| `src/client.tsx` | Chat UI |
+| `src/client.tsx` | Chat UI, Listen button, Auto-read |
 | `wrangler.jsonc` | Worker, Durable Object, vars, required secrets |
 
 ## Prerequisites
@@ -89,6 +91,6 @@ A successful run logs `daily briefing sent`. Logs are also in the Cloudflare das
 
 ## Security
 
-`/agents/*` and the chat UI have no authentication. Anyone who can reach the Worker can chat (using your Workers AI and WeatherAPI quota) and change briefing settings. API keys and the Discord webhook URL stay on the server and are not sent to the browser.
+`/agents/*` and the chat UI have no authentication. Anyone who can reach the Worker can chat, request speech for an assistant message (using your Workers AI and WeatherAPI quota), and change briefing settings. API keys and the Discord webhook URL stay on the server. Speech is generated from the stored assistant message; the browser receives audio only.
 
 Before sharing the URL widely, put the Worker behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/) (or another auth layer) and turn off the public `workers.dev` route.

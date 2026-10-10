@@ -36,6 +36,10 @@ type AgentState = {
 };
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+const TTS_SPEAKER = "asteria";
+const TTS_MAX_CHARS = 2000;
+const TTS_MESSAGE_ID_MAX = 128;
+const TTS_MODEL = "@cf/deepgram/aura-2-en" as const;
 
 function isValidTimezone(timezone: string): boolean {
 	try {
@@ -52,6 +56,71 @@ function messageText(message: SessionMessage): string {
 		.map((part) => part.text ?? "")
 		.join("")
 		.trim();
+}
+
+/** Strip markdown/code so TTS reads spoken prose only. */
+function speakableText(raw: string): string {
+	return raw
+		.replace(/```[\s\S]*?```/g, " ")
+		.replace(/`[^`]*`/g, " ")
+		.replace(/https?:\/\/\S+/gi, " ")
+		.replace(/[#>*_~\[\](){}|\\]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function truncateAtSentence(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	const slice = text.slice(0, maxChars);
+	const sentenceEnd = Math.max(
+		slice.lastIndexOf(". "),
+		slice.lastIndexOf("! "),
+		slice.lastIndexOf("? "),
+	);
+	if (sentenceEnd >= maxChars * 0.5) {
+		return slice.slice(0, sentenceEnd + 1).trim();
+	}
+	const wordEnd = slice.lastIndexOf(" ");
+	return (wordEnd > 0 ? slice.slice(0, wordEnd) : slice).trim();
+}
+
+async function audioBytesFromAiResult(output: unknown): Promise<Uint8Array> {
+	if (output instanceof Response) {
+		return new Uint8Array(await output.arrayBuffer());
+	}
+	if (output instanceof Uint8Array) {
+		return output;
+	}
+	if (output instanceof ArrayBuffer) {
+		return new Uint8Array(output);
+	}
+	if (output instanceof ReadableStream) {
+		const reader = (output as ReadableStream<Uint8Array>).getReader();
+		const chunks: Uint8Array[] = [];
+		let totalLength = 0;
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			chunks.push(value);
+			totalLength += value.length;
+		}
+		const result = new Uint8Array(totalLength);
+		let offset = 0;
+		for (const chunk of chunks) {
+			result.set(chunk, offset);
+			offset += chunk.length;
+		}
+		return result;
+	}
+	if (typeof output === "object" && output !== null) {
+		const audio = (output as { audio?: unknown }).audio;
+		if (typeof audio === "string") {
+			return Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
+		}
+	}
+	throw new Error(
+		`Unexpected TTS output type: ${Object.prototype.toString.call(output)}`,
+	);
 }
 
 function buildBriefingPrompt(forecast: DailyForecast): string {
@@ -85,6 +154,74 @@ export class MyAgent extends Think<Env, AgentState> {
 		return createWorkersAI({ binding: this.env.AI })(
 			"@cf/zai-org/glm-4.7-flash",
 		);
+	}
+
+	async onRequest(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		if (request.method !== "GET" || !url.pathname.endsWith("/tts")) {
+			return new Response("Not found", { status: 404 });
+		}
+
+		const messageId = url.searchParams.get("messageId")?.trim() ?? "";
+		if (!messageId || messageId.length > TTS_MESSAGE_ID_MAX) {
+			return new Response("Bad request", { status: 400 });
+		}
+
+		const message = await this.session.getMessage(messageId);
+		if (!message || message.role !== "assistant") {
+			return new Response("Not found", { status: 404 });
+		}
+
+		const text = truncateAtSentence(
+			speakableText(messageText(message)),
+			TTS_MAX_CHARS,
+		);
+		if (!text) {
+			return new Response(null, { status: 204 });
+		}
+
+		try {
+			const result = await this.env.AI.run(
+				TTS_MODEL,
+				{
+					text,
+					speaker: TTS_SPEAKER,
+					encoding: "mp3",
+				},
+				{ returnRawResponse: true },
+			);
+
+			if (result instanceof Response && !result.ok) {
+				const errorBody = await result
+					.text()
+					.catch(() => "<unable to read response body>");
+				console.error("tts binding error", {
+					model: TTS_MODEL,
+					messageId,
+					status: result.status,
+					errorBody,
+				});
+				return new Response("TTS failed", { status: 502 });
+			}
+
+			const audio = await audioBytesFromAiResult(result);
+			const body = new Uint8Array(audio.byteLength);
+			body.set(audio);
+			return new Response(body, {
+				status: 200,
+				headers: {
+					"Content-Type": "audio/mpeg",
+					"Cache-Control": "private, max-age=3600",
+				},
+			});
+		} catch (error) {
+			console.error("tts failed", {
+				model: TTS_MODEL,
+				messageId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return new Response("TTS failed", { status: 502 });
+		}
 	}
 
 	configureSession(session: Session) {

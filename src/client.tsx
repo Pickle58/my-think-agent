@@ -1,4 +1,10 @@
-import { isValidElement } from "react";
+import {
+	isValidElement,
+	useEffect,
+	useEffectEvent,
+	useRef,
+	useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/think/react";
@@ -8,6 +14,8 @@ import remarkGfm from "remark-gfm";
 import "./client.css";
 
 const JSON_FENCE = /```json\r?\n([\s\S]*?)\r?\n```/g;
+const AUTO_READ_KEY = "think-agent-auto-read";
+const TTS_PATH = "/agents/my-agent/default/tts";
 
 function prettyJson(text: string): string | null {
 	const trimmed = text.trim();
@@ -32,6 +40,111 @@ function toMarkdownSource(text: string): string {
 	});
 }
 
+function ttsUrl(messageId: string): string {
+	return `${TTS_PATH}?messageId=${encodeURIComponent(messageId)}`;
+}
+
+function useSpeech() {
+	const audioRef = useRef<HTMLAudioElement | null>(null);
+	const generationRef = useRef(0);
+	const [playingId, setPlayingId] = useState<string | null>(null);
+	const [loadingId, setLoadingId] = useState<string | null>(null);
+
+	useEffect(() => {
+		const audio = new Audio();
+		audioRef.current = audio;
+
+		const onEnded = () => {
+			setPlayingId(null);
+			setLoadingId(null);
+		};
+		const onError = () => {
+			if (!audio.getAttribute("src")) return;
+			setPlayingId(null);
+			setLoadingId(null);
+		};
+		const onPlaying = () => {
+			setLoadingId(null);
+		};
+		audio.addEventListener("ended", onEnded);
+		audio.addEventListener("error", onError);
+		audio.addEventListener("playing", onPlaying);
+
+		return () => {
+			generationRef.current += 1;
+			audio.pause();
+			audio.removeAttribute("src");
+			audio.removeEventListener("ended", onEnded);
+			audio.removeEventListener("error", onError);
+			audio.removeEventListener("playing", onPlaying);
+			audioRef.current = null;
+		};
+	}, []);
+
+	const stop = () => {
+		generationRef.current += 1;
+		const audio = audioRef.current;
+		if (audio) {
+			audio.pause();
+			audio.removeAttribute("src");
+		}
+		setPlayingId(null);
+		setLoadingId(null);
+	};
+
+	const play = async (messageId: string): Promise<"ok" | "blocked" | "error"> => {
+		const audio = audioRef.current;
+		if (!audio) return "error";
+
+		const generation = ++generationRef.current;
+		audio.pause();
+		audio.removeAttribute("src");
+		setLoadingId(messageId);
+		setPlayingId(messageId);
+		audio.src = ttsUrl(messageId);
+
+		try {
+			await audio.play();
+			if (generation !== generationRef.current) return "ok";
+			return "ok";
+		} catch (error) {
+			if (generation !== generationRef.current) return "ok";
+			setPlayingId(null);
+			setLoadingId(null);
+			if (
+				error instanceof DOMException &&
+				error.name === "NotAllowedError"
+			) {
+				return "blocked";
+			}
+			return "error";
+		}
+	};
+
+	return { play, stop, playingId, loadingId };
+}
+
+function useAutoReadPreference() {
+	const [enabled, setEnabled] = useState(() => {
+		try {
+			return localStorage.getItem(AUTO_READ_KEY) === "1";
+		} catch {
+			return false;
+		}
+	});
+
+	const setAutoRead = (next: boolean) => {
+		setEnabled(next);
+		try {
+			localStorage.setItem(AUTO_READ_KEY, next ? "1" : "0");
+		} catch {
+			/* ignore quota / private mode */
+		}
+	};
+
+	return [enabled, setAutoRead] as const;
+}
+
 const markdownComponents: Components = {
 	pre({ node: _node, children, ...props }) {
 		const block = <pre {...props}>{children}</pre>;
@@ -54,6 +167,52 @@ const markdownComponents: Components = {
 function Chat() {
 	const agent = useAgent({ agent: "MyAgent" });
 	const { messages, sendMessage, status } = useAgentChat({ agent });
+	const { play, stop, playingId, loadingId } = useSpeech();
+	const [autoRead, setAutoRead] = useAutoReadPreference();
+	const spokenIdsRef = useRef<Set<string>>(new Set());
+	const seededRef = useRef(false);
+	const prevStatusRef = useRef(status);
+
+	useEffect(() => {
+		if (seededRef.current) return;
+		if (messages.length === 0) return;
+		if (status === "streaming" || status === "submitted") return;
+		spokenIdsRef.current = new Set(messages.map((m) => m.id));
+		seededRef.current = true;
+	}, [messages, status]);
+
+	const onTurnReady = useEffectEvent(async () => {
+		if (!autoRead) return;
+		const lastAssistant = [...messages]
+			.reverse()
+			.find((m) => m.role === "assistant");
+		if (!lastAssistant) return;
+		if (spokenIdsRef.current.has(lastAssistant.id)) return;
+
+		spokenIdsRef.current.add(lastAssistant.id);
+		seededRef.current = true;
+		const result = await play(lastAssistant.id);
+		if (result === "blocked") {
+			setAutoRead(false);
+		}
+	});
+
+	useEffect(() => {
+		const prev = prevStatusRef.current;
+		prevStatusRef.current = status;
+		if (
+			(prev === "streaming" || prev === "submitted") &&
+			status === "ready"
+		) {
+			void onTurnReady();
+		}
+	}, [status]);
+
+	const handleAutoReadToggle = () => {
+		const next = !autoRead;
+		setAutoRead(next);
+		if (!next) stop();
+	};
 
 	return (
 		<div className="flex h-full flex-col bg-canvas text-ink">
@@ -66,6 +225,15 @@ function Chat() {
 					<h1 className="text-lg font-semibold tracking-tight text-ink">
 						Think Agent
 					</h1>
+					<label className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-muted select-none">
+						<input
+							type="checkbox"
+							checked={autoRead}
+							onChange={handleAutoReadToggle}
+							className="accent-[var(--color-accent)]"
+						/>
+						Auto-read
+					</label>
 				</div>
 			</header>
 
@@ -83,6 +251,8 @@ function Chat() {
 					) : (
 						messages.map((msg) => {
 							const isUser = msg.role === "user";
+							const isPlaying = playingId === msg.id;
+							const isLoading = loadingId === msg.id;
 							return (
 								<div
 									key={msg.id}
@@ -96,9 +266,29 @@ function Chat() {
 										}`}
 									>
 										{!isUser && (
-											<p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">
-												Assistant
-											</p>
+											<div className="mb-1 flex items-center gap-2">
+												<p className="text-xs font-medium uppercase tracking-wide text-muted">
+													Assistant
+												</p>
+												<button
+													type="button"
+													onClick={() => {
+														if (isPlaying || isLoading) {
+															stop();
+															return;
+														}
+														spokenIdsRef.current.add(msg.id);
+														void play(msg.id);
+													}}
+													className="rounded px-1.5 py-0.5 text-[11px] font-medium text-accent transition hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+												>
+													{isLoading
+														? "Loading…"
+														: isPlaying
+															? "Stop"
+															: "Listen"}
+												</button>
+											</div>
 										)}
 										{msg.parts.map((part, i) =>
 											part.type === "text" ? (
